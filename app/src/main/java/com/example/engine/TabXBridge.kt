@@ -4,17 +4,11 @@ import android.webkit.JavascriptInterface
 
 class TabXBridge(
     private val tabId: String,
-    private val onPageClickRecorded: (tabId: String, xPercent: Float, yPercent: Float) -> Unit,
-    private val onMasterTouchDispatched: (xPercent: Float, yPercent: Float) -> Unit
+    private val onPageClickRecorded: (tabId: String, xPercent: Float, yPercent: Float) -> Unit
 ) {
     @JavascriptInterface
     fun recordClick(xPercent: Float, yPercent: Float) {
         onPageClickRecorded(tabId, xPercent, yPercent)
-    }
-
-    @JavascriptInterface
-    fun dispatchSyncTouch(xPercent: Float, yPercent: Float) {
-        onMasterTouchDispatched(xPercent, yPercent)
     }
 
     companion object {
@@ -42,7 +36,18 @@ class TabXBridge(
             })();
         """.trimIndent()
 
-        // Script to simulate a click/touch on DOM/Canvas at given relative % coordinates
+        // Script to set recording active flag
+        fun setRecordingActiveScript(active: Boolean): String {
+            return "window.__tabx_recording_active = $active;"
+        }
+
+        /**
+         * Best-effort click for windows that are NOT laid out (background tabs).
+         *
+         * A window that is not on screen has no coordinate space, so native input cannot reach
+         * it; this script is the only option there. Its events are untrusted, so games may
+         * ignore them - [WebViewPool] prefers native MotionEvents whenever the window is visible.
+         */
         fun createSimulatedClickScript(xPercent: Float, yPercent: Float, randomJitterPx: Int = 0): String {
             return """
                 (function() {
@@ -52,10 +57,9 @@ class TabXBridge(
                     var jitterY = (Math.random() - 0.5) * $randomJitterPx * 2;
                     var clientX = Math.max(0, Math.min(w, ($xPercent * w) + jitterX));
                     var clientY = Math.max(0, Math.min(h, ($yPercent * h) + jitterY));
-                    
+
                     var target = document.elementFromPoint(clientX, clientY) || document.body || document.documentElement;
-                    
-                    // Dispatch touch events for mobile Canvas/H5 games (like GM99 Douluo Dalu)
+
                     try {
                         var touchObj = new Touch({
                             identifier: Date.now(),
@@ -71,54 +75,36 @@ class TabXBridge(
                             rotationAngle: 0,
                             force: 1.0
                         });
-                        
-                        var touchStart = new TouchEvent('touchstart', {
+
+                        target.dispatchEvent(new TouchEvent('touchstart', {
                             cancelable: true,
                             bubbles: true,
                             touches: [touchObj],
                             targetTouches: [touchObj],
                             changedTouches: [touchObj]
-                        });
-                        target.dispatchEvent(touchStart);
-                        
+                        }));
+
                         setTimeout(function() {
-                            var touchEnd = new TouchEvent('touchend', {
+                            target.dispatchEvent(new TouchEvent('touchend', {
                                 cancelable: true,
                                 bubbles: true,
                                 touches: [],
                                 targetTouches: [],
                                 changedTouches: [touchObj]
-                            });
-                            target.dispatchEvent(touchEnd);
-                            
-                            // Also dispatch mouse events as fallback
-                            var mouseOpts = {
-                                bubbles: true,
-                                cancelable: true,
-                                view: window,
-                                clientX: clientX,
-                                clientY: clientY
-                            };
+                            }));
+
+                            var mouseOpts = { bubbles: true, cancelable: true, view: window, clientX: clientX, clientY: clientY };
                             target.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
                             target.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
                             target.dispatchEvent(new MouseEvent('click', mouseOpts));
-                            if (typeof target.click === 'function') {
-                                target.click();
-                            }
                         }, 50);
                     } catch (e) {
-                        // Fallback for environments where Touch constructor is restricted
                         var evt = document.createEvent('MouseEvents');
                         evt.initMouseEvent('click', true, true, window, 1, clientX, clientY, clientX, clientY, false, false, false, false, 0, null);
                         target.dispatchEvent(evt);
                     }
                 })();
             """.trimIndent()
-        }
-
-        // Script to set recording active flag
-        fun setRecordingActiveScript(active: Boolean): String {
-            return "window.__tabx_recording_active = $active;"
         }
 
         // Script to mute all HTML5 audio/video in game H5 canvas

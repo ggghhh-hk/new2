@@ -4,7 +4,12 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.os.Build
+import android.os.SystemClock
+import android.util.Log
+import android.view.InputDevice
+import android.view.MotionEvent
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -22,8 +27,7 @@ class WebViewPool(
     private val onPageTitleChanged: (tabId: String, title: String) -> Unit,
     private val onPageUrlChanged: (tabId: String, url: String, canGoBack: Boolean, canGoForward: Boolean) -> Unit,
     private val onLoadingProgressChanged: (tabId: String, progress: Int, isLoading: Boolean) -> Unit,
-    private val onRecordClickReceived: (tabId: String, x: Float, y: Float) -> Unit,
-    private val onMasterSyncTouch: (x: Float, y: Float) -> Unit
+    private val onRecordClickReceived: (tabId: String, x: Float, y: Float) -> Unit
 ) {
     private val webViewMap = ConcurrentHashMap<String, WebView>()
     private val thumbnailCache = ConcurrentHashMap<String, Bitmap>()
@@ -31,13 +35,42 @@ class WebViewPool(
     /** Session profile each tab actually runs in ("Default" when the device cannot isolate). */
     private val profileNameByTab = ConcurrentHashMap<String, String>()
 
+    /**
+     * 同步群控. When on, a touch on any window is replayed into every other live window.
+     * The touched window is always the source, so group control works in the same-screen grid
+     * without depending on which cell happens to be "focused".
+     */
+    var globalSyncEnabled: Boolean = false
+
+    /** Timestamp of the last replayed MOVE, used to throttle the group-control touch stream. */
+    private var lastSyncMoveAt = 0L
+
+    /**
+     * True while group control is dispatching into the other windows.
+     *
+     * The windows receiving a replayed event would otherwise broadcast it again themselves, so
+     * the dispatch recursed through every window until the stack overflowed and killed the app.
+     * Everything here runs synchronously on the UI thread, so a plain flag is enough.
+     */
+    private var isReplayingTouch = false
+
+    private companion object {
+        const val TAG = "WebViewPool"
+
+        /** Minimum gap between replayed MOVE events, so group control cannot stutter the UI. */
+        const val SYNC_MOVE_INTERVAL_MS = 33L
+
+        /** How long a synthesised tap stays pressed - long enough for H5 games to register it. */
+        const val TAP_HOLD_MS = 60L
+    }
+
     /** True when this device's WebView can keep every account in its own cookie/storage jar. */
     val isSessionIsolationSupported: Boolean get() = SessionProfiles.isSupported()
 
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreateWebView(tab: TabItem): WebView {
         return webViewMap.getOrPut(tab.id) {
-            val webView = WebView(context)
+            val webView = SyncableWebView(context)
 
             // Hand this WebView its own account session (own cookies / localStorage / IndexedDB)
             // before it touches settings, the JS bridge or any URL - androidx.webkit throws
@@ -45,10 +78,17 @@ class WebViewPool(
             val requestedProfile = SessionProfiles.normalize(tab.profileName)
             val isIsolated = SessionProfiles.applyTo(webView, requestedProfile)
             profileNameByTab[tab.id] = if (isIsolated) requestedProfile else SessionProfiles.DEFAULT
-            android.util.Log.i(
-                "WebViewPool",
+            Log.i(
+                TAG,
                 "tab=${tab.id} -> session profile '$requestedProfile' isolated=$isIsolated"
             )
+
+            // 同步群控: publish this window's touch stream so it can be replayed into the others.
+            // The window the user actually touches is the source, which is what makes group
+            // control usable in the same-screen grid.
+            webView.touchObserver = { event ->
+                if (globalSyncEnabled && !isReplayingTouch) replayTouch(tab.id, webView, event)
+            }
             val cookieManager = if (isIsolated) {
                 SessionProfiles.cookieManagerFor(requestedProfile) ?: CookieManager.getInstance()
             } else {
@@ -97,8 +137,7 @@ class WebViewPool(
                 addJavascriptInterface(
                     TabXBridge(
                         tabId = tab.id,
-                        onPageClickRecorded = onRecordClickReceived,
-                        onMasterTouchDispatched = onMasterSyncTouch
+                        onPageClickRecorded = onRecordClickReceived
                     ),
                     TabXBridge.JS_BRIDGE_NAME
                 )
@@ -178,23 +217,121 @@ class WebViewPool(
         }
     }
 
+    /**
+     * Sends one tap into a single window (macro playback without group control).
+     *
+     * The tap is a real [MotionEvent] rather than a JavaScript-synthesised click: scripted DOM
+     * events are untrusted and are ignored by most H5 games, which is why recorded macros
+     * previously did nothing on the game canvas.
+     */
     fun executeSimulatedClickOnTab(tabId: String, xPercent: Float, yPercent: Float, jitterPx: Int = 0) {
         val webView = webViewMap[tabId] ?: return
-        val script = TabXBridge.createSimulatedClickScript(xPercent, yPercent, jitterPx)
-        webView.post {
-            webView.evaluateJavascript(script, null)
+        webView.post { dispatchNativeTap(webView, xPercent, yPercent, jitterPx) }
+    }
+
+    /** Sends one tap into every live window (macro playback with group control). */
+    fun executeSimulatedClickOnAllTabs(xPercent: Float, yPercent: Float, excludeTabId: String? = null, jitterPx: Int = 0) {
+        webViewMap.forEach { (id, webView) ->
+            if (excludeTabId == null || id != excludeTabId) {
+                webView.post { dispatchNativeTap(webView, xPercent, yPercent, jitterPx) }
+            }
         }
     }
 
-    fun executeSimulatedClickOnAllTabs(xPercent: Float, yPercent: Float, excludeTabId: String? = null, jitterPx: Int = 0) {
-        val script = TabXBridge.createSimulatedClickScript(xPercent, yPercent, jitterPx)
-        webViewMap.forEach { (id, webView) ->
-            if (excludeTabId == null || id != excludeTabId) {
-                webView.post {
-                    webView.evaluateJavascript(script, null)
+    /**
+     * Replays a touch from the window the user is touching into every other live window.
+     *
+     * Coordinates are relative, so a tap at 30%/70% of the touched window also lands at
+     * 30%/70% of every other window even though the grid cells are a different pixel size.
+     */
+    private fun replayTouch(sourceTabId: String, source: WebView, event: MotionEvent) {
+        val sourceWidth = source.width
+        val sourceHeight = source.height
+        if (sourceWidth <= 0 || sourceHeight <= 0) return
+
+        // A gesture emits far more MOVE events than the other windows can usefully consume.
+        if (event.actionMasked == MotionEvent.ACTION_MOVE) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastSyncMoveAt < SYNC_MOVE_INTERVAL_MS) return
+            lastSyncMoveAt = now
+        }
+
+        webViewMap.forEach { (tabId, target) ->
+            if (tabId == sourceTabId) return@forEach
+            val targetWidth = target.width
+            val targetHeight = target.height
+            if (targetWidth <= 0 || targetHeight <= 0) return@forEach
+            val clone = MotionEvent.obtain(event)
+            try {
+                if (targetWidth != sourceWidth || targetHeight != sourceHeight) {
+                    clone.transform(
+                        Matrix().apply {
+                            setScale(
+                                targetWidth.toFloat() / sourceWidth,
+                                targetHeight.toFloat() / sourceHeight
+                            )
+                        }
+                    )
                 }
+                isReplayingTouch = true
+                try {
+                    target.dispatchTouchEvent(clone)
+                } finally {
+                    isReplayingTouch = false
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Group control could not reach tab $tabId", t)
+            } finally {
+                clone.recycle()
             }
         }
+    }
+
+    /**
+     * Presses and releases at a relative position inside [webView].
+     * Must be called on the UI thread.
+     */
+    private fun dispatchNativeTap(webView: WebView, xPercent: Float, yPercent: Float, jitterPx: Int = 0) {
+        val width = webView.width
+        val height = webView.height
+        if (width <= 0 || height <= 0) {
+            // The window is not laid out (background tab), so it has no coordinate space for
+            // native input. Fall back to a scripted click - weaker, but better than nothing.
+            webView.evaluateJavascript(
+                TabXBridge.createSimulatedClickScript(xPercent, yPercent, jitterPx),
+                null
+            )
+            return
+        }
+
+        val jitterX = if (jitterPx > 0) ((Math.random() - 0.5) * jitterPx * 2).toFloat() else 0f
+        val jitterY = if (jitterPx > 0) ((Math.random() - 0.5) * jitterPx * 2).toFloat() else 0f
+        val maxX = (width - 1).toFloat().coerceAtLeast(1f)
+        val maxY = (height - 1).toFloat().coerceAtLeast(1f)
+        val x = (xPercent * width + jitterX).coerceIn(1f, maxX)
+        val y = (yPercent * height + jitterY).coerceIn(1f, maxY)
+
+        val downTime = SystemClock.uptimeMillis()
+        val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
+        down.source = InputDevice.SOURCE_TOUCHSCREEN
+        try {
+            webView.dispatchTouchEvent(down)
+        } finally {
+            down.recycle()
+        }
+
+        webView.postDelayed({
+            val upTime = SystemClock.uptimeMillis()
+            val up = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)
+            up.source = InputDevice.SOURCE_TOUCHSCREEN
+            try {
+                webView.dispatchTouchEvent(up)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not release synthesised tap", t)
+            } finally {
+                up.recycle()
+            }
+        }, TAP_HOLD_MS)
     }
 
     fun syncNavigateAllTabs(url: String) {

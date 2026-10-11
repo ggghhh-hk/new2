@@ -147,15 +147,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             },
             onRecordClickReceived = { tabId, xPercent, yPercent ->
                 handleRecordedClick(tabId, xPercent, yPercent)
-            },
-            onMasterSyncTouch = { xPercent, yPercent ->
-                if (_isGlobalSync.value) {
-                    webViewPool.executeSimulatedClickOnAllTabs(
-                        xPercent,
-                        yPercent,
-                        excludeTabId = _activeTabId.value
-                    )
-                }
             }
         )
 
@@ -339,8 +330,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         webViewPool.syncReloadAllTabs()
     }
 
+    /**
+     * Turns 同步群控 on/off. The pool then replays every touch from the window the user touches
+     * into all the other windows as native input events.
+     */
     fun toggleGlobalSync() {
-        _isGlobalSync.value = !_isGlobalSync.value
+        val enabled = !_isGlobalSync.value
+        _isGlobalSync.value = enabled
+        webViewPool.globalSyncEnabled = enabled
     }
 
     fun toggleKeepScreenOn() {
