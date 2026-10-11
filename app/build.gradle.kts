@@ -25,28 +25,31 @@ android {
 
   signingConfigs {
     create("release") {
+      // Only configured when an upload keystore really exists, so that `assembleRelease` still
+      // runs on a fresh clone or in CI without secrets (it then produces an unsigned APK
+      // instead of failing with "Keystore file not found").
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
-    }
-    create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      val uploadKeystore = file(keystorePath)
+      if (uploadKeystore.exists()) {
+        storeFile = uploadKeystore
+        storePassword = System.getenv("STORE_PASSWORD")
+        keyAlias = System.getenv("KEY_ALIAS").takeUnless { it.isNullOrBlank() } ?: "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
   }
 
+  // The debug build type deliberately has NO custom signing config: it uses AGP's default debug
+  // signing, which creates ~/.android/debug.keystore on demand. The previous config pointed at a
+  // gitignored ${rootDir}/debug.keystore, which made every clean clone (and any CI run that
+  // forgot to generate it) fail with "Keystore file not found".
   buildTypes {
     release {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11

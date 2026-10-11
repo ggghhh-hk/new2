@@ -32,6 +32,28 @@
 
 ---
 
+## 🔐 多账号会话隔离说明（重要）
+
+本项目通过 **WebView 多 Profile 能力**（`androidx.webkit` 的 `ProfileStore` + `WebViewCompat.setProfile`）为每个窗口分配独立的会话容器：
+
+- 每个标签页/窗口拥有**自己的 Cookie、LocalStorage、IndexedDB 与网页缓存**，多账号同时在线不会互相顶号。
+- 每个新窗口分配持久化 profile（`tabx_slot_N`），**重启 App 后登录态保留**；斗罗号库中的账号使用 `tabx_acct_<id>`，便于固定某个账号的登录态。
+- 「深度清理缓存」默认**只登出当前窗口的账号**，其他账号保持登录；需要重置全部账号时，在清理对话框中打开「同时登出全部账号」。
+
+**设备要求**：该能力依赖系统 WebView 支持多 Profile（Android System WebView 119+，近两年更新过的设备基本都支持）。App 启动时会输出一行日志：
+
+```
+SessionProfiles: WebView multi-profile session isolation supported = true
+```
+
+若显示 `false`，说明该设备 WebView 过旧，此时所有窗口会回退到共用的默认会话（会出现顶号）。在 Android Studio 的 Logcat 中过滤 `SessionProfiles` / `WebViewPool`，即可看到每个窗口实际绑定的 profile：
+
+```
+WebViewPool: tab=<id> -> session profile 'tabx_slot_1' isolated=true
+```
+
+---
+
 ## 📱 如何下载与安装运行 APK
 
 ### 方式一：GitHub Actions CI/CD 自动构建与下载 APK（最省心，全自动）
@@ -39,10 +61,14 @@
 1. **自动构建**：每次向 `main` 分支提交代码或发起 Pull Request 时，GitHub 都会自动在云端编译生成最新的 Debug APK。
 2. **下载 APK 制件 (Artifacts)**：
    - 打开你的 GitHub 仓库，点击顶部的 **Actions** 标签页。
-   - 点击最新一次成功的运行记录（如 `Build & Release Android APK`）。
-   - 在页面底部的 **Artifacts** 区域，直接点击 **`TabX-DLDL-Debug-APK`** 即可下载生成的 APK 压缩包。
+   - 点击最新一次成功的运行记录（如 `Build Debug APK`）。
+   - 在页面底部的 **Artifacts** 区域，直接点击 **`TabX-DLDL-Debug-APK`** 即可下载生成的 APK。
+   - ⚠️ 产物**只保留 30 天**（`retention-days: 30`），过期后需要重新跑一次工作流；工作流支持手动触发：Actions → 选中本工作流 → **Run workflow**。
 3. **自动发布 Release**：
-   - 只要给仓库推送版本 Tag（例如 `git tag v1.0.0 && git push origin v1.0.0`），CI/CD 会自动在 GitHub Releases 页面创建新发布版本并挂载 APK 下载文件。
+   - 推送版本 Tag（例如 `git tag v1.0.0 && git push origin v1.0.0`）后，CI/CD 会自动创建 Release 并挂载 APK。
+   - 未配置签名密钥时发布的是 **debug** APK，文件名会明确标注 `-debug.apk`；配置以下仓库 Secrets 后会改为发布正式签名的 release APK（`-release.apk`）：
+     `KEYSTORE_BASE64`（上传密钥 `.jks` 的 base64）、`STORE_PASSWORD`、`KEY_PASSWORD`、`KEY_ALIAS`（可选，默认 `upload`）。
+   - 若构建失败或没有产出 APK，工作流会**直接报错并标红**，不会再出现"绿勾却下载不到 APK"的情况。
 
 ---
 
@@ -69,7 +95,7 @@ cd <项目目录>
 #### 3. 编译与运行 APK
 - **连接真机或启动模拟器**（启用 USB 调试）。
 - 点击 Android Studio 顶部工具栏的绿色 ▶ **Run 'app'** 按钮即可自动构建并安装到设备中。
-- 或在终端执行 Gradle 命令生成 Release/Debug APK：
+- 或在终端执行 Gradle 命令生成 APK（仓库已内置 Gradle Wrapper，无需另外安装 Gradle）：
 ```bash
 # Linux / macOS:
 ./gradlew assembleDebug
@@ -78,6 +104,7 @@ cd <项目目录>
 gradlew.bat assembleDebug
 ```
 - 生成的 APK 路径位于：`app/build/outputs/apk/debug/app-debug.apk`。
+- **无需手工准备签名文件**：debug 构建使用 AGP 自动生成的默认调试密钥；首次构建时 AGP 会自动下载所需的 Android SDK 平台（`android-36.1`）。
 
 ---
 
