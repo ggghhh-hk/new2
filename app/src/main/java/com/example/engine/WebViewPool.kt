@@ -45,6 +45,9 @@ class WebViewPool(
     /** Timestamp of the last replayed MOVE, used to throttle the group-control touch stream. */
     private var lastSyncMoveAt = 0L
 
+    /** Macro recording state, re-applied to every page after a navigation. */
+    private var isRecordingActive = false
+
     /**
      * True while group control is dispatching into the other windows.
      *
@@ -62,6 +65,13 @@ class WebViewPool(
 
         /** How long a synthesised tap stays pressed - long enough for H5 games to register it. */
         const val TAP_HOLD_MS = 60L
+
+        /** Hold time for a LONG_PRESS macro step. */
+        const val LONG_PRESS_MS = 800L
+
+        /** Default travel time and step count for a synthesised swipe. */
+        const val SWIPE_DURATION_MS = 350L
+        const val SWIPE_STEPS = 10
     }
 
     /** True when this device's WebView can keep every account in its own cookie/storage jar. */
@@ -157,8 +167,13 @@ class WebViewPool(
                         url?.let {
                             onPageUrlChanged(tab.id, it, canGoBack(), canGoForward())
                         }
-                        // Inject touch listener script for macro recording
+                        // Inject touch listener script for macro recording, then restore the
+                        // "recording is on" flag. The flag only lives in the current document,
+                        // so recording used to die silently on the first page navigation.
                         view?.evaluateJavascript(TabXBridge.RECORDING_INJECTION_SCRIPT, null)
+                        if (isRecordingActive) {
+                            view?.evaluateJavascript(TabXBridge.setRecordingActiveScript(true), null)
+                        }
                     }
 
                     override fun shouldOverrideUrlLoading(
@@ -171,10 +186,15 @@ class WebViewPool(
                         }
                         // Allow custom schemes (e.g. GM99 pay, alipay, weixin)
                         return try {
+                            // `context` is the Application context here, so the intent must carry
+                            // FLAG_ACTIVITY_NEW_TASK - without it startActivity throws and the
+                            // payment / customer-service link silently did nothing.
                             val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, request.url)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                             context.startActivity(intent)
                             true
                         } catch (e: Exception) {
+                            Log.w(TAG, "No activity can open $requestUrl", e)
                             true
                         }
                     }
@@ -211,6 +231,7 @@ class WebViewPool(
     }
 
     fun applyRecordingState(active: Boolean) {
+        isRecordingActive = active
         val script = TabXBridge.setRecordingActiveScript(active)
         webViewMap.values.forEach { webView ->
             webView.evaluateJavascript(script, null)
@@ -229,13 +250,75 @@ class WebViewPool(
         webView.post { dispatchNativeTap(webView, xPercent, yPercent, jitterPx) }
     }
 
-    /** Sends one tap into every live window (macro playback with group control). */
+    /**
+     * Sends one tap into every live window (macro playback with group control).
+     */
     fun executeSimulatedClickOnAllTabs(xPercent: Float, yPercent: Float, excludeTabId: String? = null, jitterPx: Int = 0) {
         webViewMap.forEach { (id, webView) ->
             if (excludeTabId == null || id != excludeTabId) {
                 webView.post { dispatchNativeTap(webView, xPercent, yPercent, jitterPx) }
             }
         }
+    }
+
+    /** Sends a long press into a single window (LONG_PRESS macro step). */
+    fun executeSimulatedLongPressOnTab(
+        tabId: String,
+        xPercent: Float,
+        yPercent: Float,
+        holdMs: Long = LONG_PRESS_MS,
+        jitterPx: Int = 0
+    ) {
+        val webView = webViewMap[tabId] ?: return
+        webView.post { dispatchNativeTap(webView, xPercent, yPercent, jitterPx, holdMs) }
+    }
+
+    /** Sends a long press into every live window. */
+    fun executeSimulatedLongPressOnAllTabs(
+        xPercent: Float,
+        yPercent: Float,
+        holdMs: Long = LONG_PRESS_MS,
+        jitterPx: Int = 0
+    ) {
+        webViewMap.values.forEach { webView ->
+            webView.post { dispatchNativeTap(webView, xPercent, yPercent, jitterPx, holdMs) }
+        }
+    }
+
+    /** Drags inside a single window, used by the SCROLL_DOWN / SCROLL_UP macro steps. */
+    fun executeSimulatedSwipeOnTab(
+        tabId: String,
+        xPercent: Float,
+        yPercent: Float,
+        deltaXPercent: Float,
+        deltaYPercent: Float,
+        durationMs: Long = SWIPE_DURATION_MS
+    ) {
+        val webView = webViewMap[tabId] ?: return
+        webView.post {
+            dispatchNativeSwipe(webView, xPercent, yPercent, deltaXPercent, deltaYPercent, durationMs)
+        }
+    }
+
+    /** Drags inside every live window. */
+    fun executeSimulatedSwipeOnAllTabs(
+        xPercent: Float,
+        yPercent: Float,
+        deltaXPercent: Float,
+        deltaYPercent: Float,
+        durationMs: Long = SWIPE_DURATION_MS
+    ) {
+        webViewMap.values.forEach { webView ->
+            webView.post {
+                dispatchNativeSwipe(webView, xPercent, yPercent, deltaXPercent, deltaYPercent, durationMs)
+            }
+        }
+    }
+
+    /** Reloads one specific window (RELOAD_PAGE macro step without group control). */
+    fun reloadTab(tabId: String) {
+        val webView = webViewMap[tabId] ?: return
+        webView.post { webView.reload() }
     }
 
     /**
@@ -291,7 +374,13 @@ class WebViewPool(
      * Presses and releases at a relative position inside [webView].
      * Must be called on the UI thread.
      */
-    private fun dispatchNativeTap(webView: WebView, xPercent: Float, yPercent: Float, jitterPx: Int = 0) {
+    private fun dispatchNativeTap(
+        webView: WebView,
+        xPercent: Float,
+        yPercent: Float,
+        jitterPx: Int = 0,
+        holdMs: Long = TAP_HOLD_MS
+    ) {
         val width = webView.width
         val height = webView.height
         if (width <= 0 || height <= 0) {
@@ -331,7 +420,69 @@ class WebViewPool(
             } finally {
                 up.recycle()
             }
-        }, TAP_HOLD_MS)
+        }, holdMs)
+    }
+
+    /**
+     * Drags from a relative start point by a relative delta, then releases.
+     * Used by the SCROLL_DOWN / SCROLL_UP macro steps. Must run on the UI thread.
+     */
+    private fun dispatchNativeSwipe(
+        webView: WebView,
+        xPercent: Float,
+        yPercent: Float,
+        deltaXPercent: Float,
+        deltaYPercent: Float,
+        durationMs: Long = SWIPE_DURATION_MS
+    ) {
+        val width = webView.width
+        val height = webView.height
+        if (width <= 0 || height <= 0) {
+            // Not laid out, no coordinate space for a gesture - scroll the document instead.
+            webView.evaluateJavascript(
+                TabXBridge.createSimulatedScrollScript(deltaYPercent),
+                null
+            )
+            return
+        }
+
+        val maxX = (width - 1).toFloat().coerceAtLeast(1f)
+        val maxY = (height - 1).toFloat().coerceAtLeast(1f)
+        val startX = (xPercent * width).coerceIn(1f, maxX)
+        val startY = (yPercent * height).coerceIn(1f, maxY)
+        val endX = ((xPercent + deltaXPercent) * width).coerceIn(1f, maxX)
+        val endY = ((yPercent + deltaYPercent) * height).coerceIn(1f, maxY)
+
+        val downTime = SystemClock.uptimeMillis()
+        val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY, 0)
+        down.source = InputDevice.SOURCE_TOUCHSCREEN
+        try {
+            webView.dispatchTouchEvent(down)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Swipe press failed", t)
+        } finally {
+            down.recycle()
+        }
+
+        val stepDelay = (durationMs / SWIPE_STEPS).coerceAtLeast(1L)
+        for (step in 1..SWIPE_STEPS) {
+            webView.postDelayed({
+                val fraction = step.toFloat() / SWIPE_STEPS
+                val x = startX + (endX - startX) * fraction
+                val y = startY + (endY - startY) * fraction
+                val eventTime = SystemClock.uptimeMillis()
+                val action = if (step == SWIPE_STEPS) MotionEvent.ACTION_UP else MotionEvent.ACTION_MOVE
+                val move = MotionEvent.obtain(downTime, eventTime, action, x, y, 0)
+                move.source = InputDevice.SOURCE_TOUCHSCREEN
+                try {
+                    webView.dispatchTouchEvent(move)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Swipe step $step failed", t)
+                } finally {
+                    move.recycle()
+                }
+            }, stepDelay * step)
+        }
     }
 
     fun syncNavigateAllTabs(url: String) {

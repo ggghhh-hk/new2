@@ -155,6 +155,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     private fun initPresetData() {
         viewModelScope.launch {
+            // Presets are seeded exactly once, on a genuinely empty database. This used to run
+            // unconditionally on every process start, so every launch appended another copy of
+            // each preset bookmark/account/script.
             // Seed preset bookmarks if empty
             val bookmarks = listOf(
                 BrowserBookmark(title = "GM99 斗罗大陆H5 官方入口", url = "https://m.gm99.com/dldl", isGamePreset = true),
@@ -162,7 +165,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 BrowserBookmark(title = "斗罗大陆H5 论坛与攻略", url = "https://m.gm99.com", isGamePreset = true),
                 BrowserBookmark(title = "百度搜索", url = "https://www.baidu.com", isGamePreset = false)
             )
-            bookmarks.forEach { bookmarkDao.insertBookmark(it) }
+            if (bookmarkDao.countBookmarks() == 0) {
+                bookmarks.forEach { bookmarkDao.insertBookmark(it) }
+            }
 
             // Seed preset accounts if empty
             val accounts = listOf(
@@ -188,11 +193,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     colorTagHex = "#F59E0B"
                 )
             )
-            accounts.forEach { accountDao.insertAccount(it) }
+            if (accountDao.countAccounts() == 0) {
+                accounts.forEach { accountDao.insertAccount(it) }
+            }
 
             // Seed preset scripts
-            MacroHelper.getPresetScripts().forEach {
-                macroDao.insertScript(it.copy(id = 0))
+            if (macroDao.countScripts() == 0) {
+                MacroHelper.getPresetScripts().forEach {
+                    macroDao.insertScript(it.copy(id = 0))
+                }
             }
         }
     }
@@ -445,7 +454,13 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private fun handleRecordedClick(tabId: String, xPercent: Float, yPercent: Float) {
         if (!_isRecording.value) return
         val now = System.currentTimeMillis()
-        val delay = if (lastRecordedClickTime > 0) (now - lastRecordedClickTime).coerceIn(400L, 10000L) else 1000L
+        val delay = if (lastRecordedClickTime > 0) {
+            // Keep the recorded rhythm: the old 400ms floor stretched every quick tap into a
+            // 400ms wait, so a fast recorded combo played back far slower than it was recorded.
+            (now - lastRecordedClickTime).coerceIn(80L, 30000L)
+        } else {
+            1000L
+        }
         lastRecordedClickTime = now
 
         val stepNumber = _recordedActions.value.size + 1

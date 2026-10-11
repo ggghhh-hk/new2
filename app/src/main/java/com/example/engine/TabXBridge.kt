@@ -19,22 +19,44 @@ class TabXBridge(
             (function() {
                 if (window.__tabx_recording_installed) return;
                 window.__tabx_recording_installed = true;
-                
+
+                var lastRecordedAt = 0;
+
                 function handleTouch(e) {
                     if (!window.__tabx_recording_active) return;
                     var touch = e.touches ? e.touches[0] : e;
                     if (!touch) return;
+
+                    // Chromium fires a compatibility mousedown right after touchstart for the very
+                    // same tap, which used to record every tap twice with a bogus delay.
+                    var now = Date.now();
+                    if (now - lastRecordedAt < 400) return;
+                    lastRecordedAt = now;
+
                     var x = touch.clientX / (window.innerWidth || document.documentElement.clientWidth || 1);
                     var y = touch.clientY / (window.innerHeight || document.documentElement.clientHeight || 1);
                     if (window.$JS_BRIDGE_NAME && window.$JS_BRIDGE_NAME.recordClick) {
                         window.$JS_BRIDGE_NAME.recordClick(x, y);
                     }
                 }
-                
+
                 window.addEventListener('touchstart', handleTouch, { passive: true, capture: true });
                 window.addEventListener('mousedown', handleTouch, { passive: true, capture: true });
             })();
         """.trimIndent()
+
+        /**
+         * Best-effort scroll for windows that are NOT laid out (background tabs), where a
+         * synthesised drag has no coordinate space to travel through.
+         */
+        fun createSimulatedScrollScript(deltaYPercent: Float): String {
+            return """
+                (function() {
+                    var h = window.innerHeight || document.documentElement.clientHeight || 640;
+                    try { window.scrollBy(0, $deltaYPercent * h); } catch (e) {}
+                })();
+            """.trimIndent()
+        }
 
         // Script to set recording active flag
         fun setRecordingActiveScript(active: Boolean): String {

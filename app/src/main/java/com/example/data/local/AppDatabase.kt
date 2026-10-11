@@ -34,6 +34,9 @@ interface MacroDao {
 
     @Query("DELETE FROM macro_scripts WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("SELECT COUNT(*) FROM macro_scripts")
+    suspend fun countScripts(): Int
 }
 
 @Dao
@@ -52,6 +55,9 @@ interface AccountDao {
 
     @Query("DELETE FROM account_profiles WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("SELECT COUNT(*) FROM account_profiles")
+    suspend fun countAccounts(): Int
 }
 
 @Dao
@@ -64,6 +70,9 @@ interface BookmarkDao {
 
     @Delete
     suspend fun deleteBookmark(bookmark: BrowserBookmark)
+
+    @Query("SELECT COUNT(*) FROM browser_bookmarks")
+    suspend fun countBookmarks(): Int
 }
 
 @Database(

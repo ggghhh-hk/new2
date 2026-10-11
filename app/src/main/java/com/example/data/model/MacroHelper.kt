@@ -108,6 +108,24 @@ object MacroHelper {
                 intervalBetweenLoopsMs = 1000L
             ),
             MacroScript(
+                id = -5,
+                name = "通用网页: 滚动 + 长按动作演示",
+                description = "演示 SCROLL_DOWN / SCROLL_UP 滑动与 LONG_PRESS 长按步骤，可作为自定义脚本的模板",
+                category = "通用挂机",
+                actionsJson = toJson(
+                    listOf(
+                        MacroAction(ActionType.SCROLL_DOWN, 0.5f, 0.7f, 1200L, label = "向下滚动一屏"),
+                        MacroAction(ActionType.SCROLL_DOWN, 0.5f, 0.7f, 1200L, label = "继续向下滚动"),
+                        MacroAction(ActionType.SCROLL_UP, 0.5f, 0.3f, 1200L, label = "向上滚回"),
+                        MacroAction(ActionType.LONG_PRESS, 0.5f, 0.5f, 1200L, label = "长按屏幕中央")
+                    )
+                ),
+                repeatCount = 1,
+                speedMultiplier = 1.0f,
+                randomJitterPx = 0,
+                intervalBetweenLoopsMs = 1000L
+            ),
+            MacroScript(
                 id = -4,
                 name = "通用网页: 定时全屏连点/防掉线心跳",
                 description = "在屏幕中心定期触发轻触，保持H5游戏WebSocket连接不断开，防止挂机被判定离线",
