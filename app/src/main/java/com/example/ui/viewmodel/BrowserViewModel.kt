@@ -19,6 +19,7 @@ import com.example.engine.CleanResult
 import com.example.engine.MacroExecutionEngine
 import com.example.engine.MacroState
 import com.example.engine.SessionCleaner
+import com.example.engine.SessionProfiles
 import com.example.engine.WebViewPool
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -45,13 +47,25 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     // Tabs Management
+    /**
+     * Every window runs in its own persistent WebView session profile, which is what lets
+     * several accounts stay logged in at the same time instead of kicking each other out.
+     * Slot 1 belongs to the tab the app opens with; later windows take the next slot, so two
+     * windows can never end up sharing one cookie jar.
+     */
+    private val sessionSlotCounter = AtomicInteger(2)
+
+    private fun nextSessionProfileName(): String =
+        SessionProfiles.slotProfileName(sessionSlotCounter.getAndIncrement())
+
     private val defaultTab = TabItem(
         id = UUID.randomUUID().toString(),
         title = "斗罗大陆H5 (GM99)",
         url = "https://m.gm99.com/dldl",
         originalUrl = "https://m.gm99.com/dldl",
         isSyncMaster = true,
-        accountTag = "主号"
+        accountTag = "主号",
+        profileName = SessionProfiles.slotProfileName(1)
     )
 
     private val _tabs = MutableStateFlow<List<TabItem>>(listOf(defaultTab))
@@ -210,7 +224,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun addNewTab(
         url: String = "https://m.gm99.com/dldl",
         accountTag: String? = null,
-        title: String = "GM99 斗罗H5"
+        title: String = "GM99 斗罗H5",
+        profileName: String? = null
     ) {
         val count = _tabs.value.size + 1
         val newTab = TabItem(
@@ -218,7 +233,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             title = if (accountTag != null) "$title ($accountTag)" else "标签页 $count",
             url = url,
             originalUrl = url,
-            accountTag = accountTag ?: "小号$count"
+            accountTag = accountTag ?: "小号$count",
+            profileName = profileName ?: nextSessionProfileName()
         )
         _tabs.value = _tabs.value + newTab
         _activeTabId.value = newTab.id
@@ -282,7 +298,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     title = "斗罗H5-$padNum",
                     url = url,
                     originalUrl = url,
-                    accountTag = "小号-$padNum"
+                    accountTag = "小号-$padNum",
+                    profileName = nextSessionProfileName()
                 )
             }
             currentTabs.addAll(generated)
@@ -386,13 +403,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         SessionCleaner.performClean(
             context = getApplication(),
             options = options,
-            activeWebView = webView
+            activeWebView = webView,
+            // Sign out only the account the user is looking at, unless they asked for all of them.
+            activeProfileName = activeTab?.let {
+                webViewPool.profileNameForTab(it.id) ?: it.profileName
+            },
+            allProfileNames = _tabs.value.map { it.profileName }
         ) { result ->
             val sizeKb = result.bytesCleanedEstimate / 1024
             val msg = buildString {
                 append("清理完成: ")
                 if (result.cacheCleared) append("缓存数据 ")
-                if (result.cookiesCleared) append("Cookies会话 ")
+                if (result.cookiesCleared) {
+                    append(if (options.allAccounts) "全部账号会话 " else "当前账号会话 ")
+                }
                 if (result.storageCleared) append("LocalStorage储存 ")
                 if (sizeKb > 0) append("($sizeKb KB)")
             }
@@ -503,7 +527,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         addNewTab(
             url = url,
             accountTag = account.accountName,
-            title = "斗罗H5-${account.serverName}"
+            title = "斗罗H5-${account.serverName}",
+            // One stable profile per saved account, so this account keeps its own login.
+            profileName = SessionProfiles.accountProfileName(account.id)
         )
     }
 
@@ -513,6 +539,22 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         updateTab(tabId) { it.copy(isMuted = newMuted) }
         webViewPool.setTabMuted(tabId, newMuted)
     }
+
+    /**
+     * False on devices whose WebView cannot hold separate session profiles. In that case every
+     * account falls back to one shared cookie jar and will kick the others out, so the UI should
+     * warn the user instead of promising isolated multi-account.
+     */
+    val isSessionIsolationSupported: Boolean get() = webViewPool.isSessionIsolationSupported
+
+    /** Session profile the focused window is using, for display/debugging. */
+    fun activeProfileName(): String? = webViewPool.profileNameForTab(_activeTabId.value)
+
+    /** Logs out only the focused account; the other windows stay signed in. */
+    fun clearActiveTabSession(): Boolean = webViewPool.clearSessionForTab(_activeTabId.value)
+
+    /** Logs out every account that owns an isolated session. */
+    fun clearAllTabSessions(): Int = webViewPool.clearAllIsolatedSessions()
 
     fun captureVisibleThumbnails() {
         _tabs.value.forEach { tab ->

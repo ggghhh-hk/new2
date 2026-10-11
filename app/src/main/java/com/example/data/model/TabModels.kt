@@ -16,6 +16,12 @@ data class TabItem(
     val isSyncEnabled: Boolean = true,
     val isMuted: Boolean = false,
     val accountTag: String? = null,
+    /**
+     * Name of the isolated WebView session profile this tab runs in.
+     * Each profile has its own cookie jar, localStorage and IndexedDB, which is what keeps
+     * multiple accounts logged in at the same time. Blank or "Default" means the shared profile.
+     */
+    val profileName: String = "",
     val zoomLevel: Float = 1.0f,
     val lastActiveTime: Long = System.currentTimeMillis()
 )

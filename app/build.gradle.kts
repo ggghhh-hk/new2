@@ -98,6 +98,9 @@ dependencies {
   // implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
+  // WebView multi-profile support: gives every account its own cookie jar / web storage so
+  // multiple accounts can stay logged in at the same time instead of kicking each other out.
+  implementation(libs.androidx.webkit)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)

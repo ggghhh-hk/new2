@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cookie
@@ -61,6 +62,7 @@ fun CacheCleanerDialog(
     var clearLocalStorage by remember { mutableStateOf(true) }
     var clearHistory by remember { mutableStateOf(true) }
     var clearFormData by remember { mutableStateOf(true) }
+    var allAccounts by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -120,7 +122,7 @@ fun CacheCleanerDialog(
                     CleanOptionItem(
                         icon = Icons.Default.Cookie,
                         title = "Cookies 与登录凭据",
-                        subtitle = "清除所有网页登录状态与身份Session",
+                        subtitle = "默认只清除当前窗口的账号，其他账号保持登录状态",
                         checked = clearCookies,
                         onCheckedChange = { clearCookies = it }
                     )
@@ -144,6 +146,14 @@ fun CacheCleanerDialog(
                         }
                     )
 
+                    CleanOptionItem(
+                        icon = Icons.Default.AccountCircle,
+                        title = "同时登出全部账号",
+                        subtitle = "关闭时只清理当前账号；打开会清除所有窗口的登录状态",
+                        checked = allAccounts,
+                        onCheckedChange = { allAccounts = it }
+                    )
+
                     Spacer(modifier = Modifier.height(8.dp))
 
                     Row(
@@ -165,7 +175,8 @@ fun CacheCleanerDialog(
                                         clearCookies = clearCookies,
                                         clearLocalStorage = clearLocalStorage,
                                         clearHistory = clearHistory,
-                                        clearFormData = clearFormData
+                                        clearFormData = clearFormData,
+                                        allAccounts = allAccounts
                                     )
                                 )
                                 onDismiss()

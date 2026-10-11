@@ -28,10 +28,34 @@ class WebViewPool(
     private val webViewMap = ConcurrentHashMap<String, WebView>()
     private val thumbnailCache = ConcurrentHashMap<String, Bitmap>()
 
+    /** Session profile each tab actually runs in ("Default" when the device cannot isolate). */
+    private val profileNameByTab = ConcurrentHashMap<String, String>()
+
+    /** True when this device's WebView can keep every account in its own cookie/storage jar. */
+    val isSessionIsolationSupported: Boolean get() = SessionProfiles.isSupported()
+
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreateWebView(tab: TabItem): WebView {
         return webViewMap.getOrPut(tab.id) {
-            WebView(context).apply {
+            val webView = WebView(context)
+
+            // Hand this WebView its own account session (own cookies / localStorage / IndexedDB)
+            // before it touches settings, the JS bridge or any URL - androidx.webkit throws
+            // IllegalStateException if setProfile() happens any later than this.
+            val requestedProfile = SessionProfiles.normalize(tab.profileName)
+            val isIsolated = SessionProfiles.applyTo(webView, requestedProfile)
+            profileNameByTab[tab.id] = if (isIsolated) requestedProfile else SessionProfiles.DEFAULT
+            android.util.Log.i(
+                "WebViewPool",
+                "tab=${tab.id} -> session profile '$requestedProfile' isolated=$isIsolated"
+            )
+            val cookieManager = if (isIsolated) {
+                SessionProfiles.cookieManagerFor(requestedProfile) ?: CookieManager.getInstance()
+            } else {
+                CookieManager.getInstance()
+            }
+
+            webView.apply {
                 layoutParams = android.view.ViewGroup.LayoutParams(
                     android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                     android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -65,9 +89,9 @@ class WebViewPool(
                     }
                 }
 
-                // Enable multi-instance cookie support
-                CookieManager.getInstance().setAcceptCookie(true)
-                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                // Accept cookies in this account's own session jar instead of one shared jar.
+                cookieManager.setAcceptCookie(true)
+                cookieManager.setAcceptThirdPartyCookies(this, true)
 
                 // Inject TabX Bridge for macro recording and automation
                 addJavascriptInterface(
@@ -238,8 +262,26 @@ class WebViewPool(
         }
     }
 
+    /** Session profile a tab is running in, or null while its WebView has not been created. */
+    fun profileNameForTab(tabId: String): String? = profileNameByTab[tabId]
+
+    /**
+     * Logs one account out by clearing only that account's session profile.
+     * Returns false when the tab has no isolated session - global cookies are never wiped here,
+     * so this can never sign the other accounts out.
+     */
+    fun clearSessionForTab(tabId: String): Boolean {
+        val profileName = profileNameByTab[tabId] ?: return false
+        return SessionProfiles.clearSession(profileName)
+    }
+
+    /** Logs out every tab that owns an isolated session. Returns how many were cleared. */
+    fun clearAllIsolatedSessions(): Int =
+        profileNameByTab.values.distinct().count { SessionProfiles.clearSession(it) }
+
     fun releaseTab(tabId: String) {
         thumbnailCache.remove(tabId)?.recycle()
+        profileNameByTab.remove(tabId)
         webViewMap.remove(tabId)?.apply {
             stopLoading()
             loadUrl("about:blank")
@@ -252,6 +294,7 @@ class WebViewPool(
     fun releaseAll() {
         thumbnailCache.values.forEach { it.recycle() }
         thumbnailCache.clear()
+        profileNameByTab.clear()
         webViewMap.forEach { (_, webView) ->
             webView.stopLoading()
             webView.loadUrl("about:blank")
